@@ -1,34 +1,39 @@
 package main
 
-import "fmt"
+import (
+	"flag"
+	"fmt"
+	"log"
+	"strings"
+)
+
+func parseSeeds(seeds string) []string {
+	if seeds == "" {
+		return []string{}
+	}
+	return strings.Split(seeds, ",")
+}
 
 func main() {
-	bc := NewBlockchain()
-	defer bc.db.Close() // 程序结束前关闭数据库
+	port := flag.String("port", "", "Node port")
+	seeds := flag.String("seeds", "", "Other known nodes (comma-separated)")
+	miner := flag.String("miner", "", "Miner address")
+	flag.Parse()
 
-	bc.AddBlock("Send 1 BTC to Alice")
-	bc.AddBlock("Send 2 BTC to Bob")
-	bc.AddBlock("Send 3 BTC to Charlie")
-
-	it := bc.Iterator()
-
-	for {
-		block := it.Next()
-
-		fmt.Println("======================")
-		fmt.Printf("Prev. hash: %x\n", block.PrevBlockHash)
-		for i, tx := range block.Transactions {
-			fmt.Printf(" Transaction %d: %s\n", i, tx.Data)
-		}
-		fmt.Printf("Hash: %x\n", block.Hash)
-		fmt.Printf("Nonce: %d\n", block.Nonce)
-
-		pow := NewProofOfWork(block)
-		fmt.Printf("PoW Valid: %v\n", pow.Validate())
-
-		if len(block.PrevBlockHash) == 0 {
-			// 遍历到创世区块
-			break
-		}
+	if *port == "" {
+		log.Panic("No port specified. Use --port")
 	}
+
+	// 将port作为nodeID
+	nodeID := *port
+
+	seedNodes := parseSeeds(*seeds)
+	if len(seedNodes) > 0 {
+		KnownNodes = seedNodes
+	}
+
+	fmt.Printf("KnownNodes after parse: %v\n", KnownNodes)
+
+	// 传入nodeID给StartServer，以便后续在NewBlockchain中使用nodeID生成独立db文件
+	StartServer(nodeID, *miner)
 }

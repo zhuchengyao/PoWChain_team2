@@ -1,0 +1,131 @@
+package main
+
+import (
+    "bytes"
+    "encoding/gob"
+    "log"
+
+    "go.etcd.io/bbolt"
+)
+
+var utxoBucket = []byte("utxo")
+
+type UTXOSet struct {
+    BC *Blockchain
+}
+
+func (u *UTXOSet) Reindex() {
+    err := u.BC.db.Update(func(tx *bbolt.Tx) error {
+        err := tx.DeleteBucket(utxoBucket)
+        if err != nil && err != bbolt.ErrBucketNotFound {
+            return err
+        }
+        _, err = tx.CreateBucket(utxoBucket)
+        return err
+    })
+    if err != nil {
+        log.Panic(err)
+    }
+
+    UTXO := u.BC.FindAllUTXO()
+    err = u.BC.db.Update(func(tx *bbolt.Tx) error {
+        b := tx.Bucket(utxoBucket)
+        for txid, outs := range UTXO {
+            txIDBytes := []byte(txid)
+            err := b.Put(txIDBytes, serializeOutputs(outs))
+            if err != nil {
+                return err
+            }
+        }
+        return nil
+    })
+    if err != nil {
+        log.Panic(err)
+    }
+}
+
+// Update 在区块加入链后更新UTXO集
+func (u *UTXOSet) Update(block *Block) {
+    err := u.BC.db.Update(func(tx *bbolt.Tx) error {
+        b := tx.Bucket(utxoBucket)
+
+        for _, tx := range block.Transactions {
+            if !tx.IsCoinbase() {
+                for _, vin := range tx.Vin {
+                    updatedOuts := []TXOutput{}
+                    outsBytes := b.Get(vin.Txid)
+                    if len(outsBytes) == 0 {
+                        continue
+                    }
+                    outs := deserializeOutputs(outsBytes)
+                    for outIdx, out := range outs {
+                        if outIdx != vin.Vout {
+                            updatedOuts = append(updatedOuts, out)
+                        }
+                    }
+
+                    if len(updatedOuts) == 0 {
+                        err := b.Delete(vin.Txid)
+                        if err != nil {
+                            return err
+                        }
+                    } else {
+                        err := b.Put(vin.Txid, serializeOutputs(updatedOuts))
+                        if err != nil {
+                            return err
+                        }
+                    }
+                }
+            }
+
+            // 添加新产生的未花费输出
+            newOutputs := []TXOutput{}
+            for _, out := range tx.Vout {
+                newOutputs = append(newOutputs, out)
+            }
+            if len(newOutputs) > 0 {
+                outsBytes := b.Get(tx.ID)
+                if outsBytes != nil {
+                    // 该交易可能已存过一部分UTXO(一般不会，但预留逻辑)
+                    existingOuts := deserializeOutputs(outsBytes)
+                    newOutputs = append(existingOuts, newOutputs...)
+                }
+                err := b.Put(tx.ID, serializeOutputs(newOutputs))
+                if err != nil {
+                    return err
+                }
+            }
+        }
+
+        return nil
+    })
+    if err != nil {
+        log.Panic(err)
+    }
+}
+
+// FindUTXOForAddress 从UTXO集快速查询某地址所有UTXO
+func (u *UTXOSet) FindUTXOForAddress(pubKeyHash []byte) []TXOutput {
+    var UTXOs []TXOutput
+
+    err := u.BC.db.View(func(tx *bbolt.Tx) error {
+        b := tx.Bucket(utxoBucket)
+        c := b.Cursor()
+
+        for k, v := c.First(); k != nil; k, v = c.Next() {
+            outs := deserializeOutputs(v)
+            for _, out := range outs {
+                if string(out.PubKeyHash) == string(pubKeyHash) {
+                    UTXOs = append(UTXOs, out)
+                }
+            }
+        }
+
+        return nil
+    })
+    if err != nil {
+        log.Panic(err)
+    }
+
+    return UTXOs
+}

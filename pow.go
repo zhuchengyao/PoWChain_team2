@@ -17,9 +17,7 @@ type ProofOfWork struct {
 func NewProofOfWork(b *Block) *ProofOfWork {
 	target := big.NewInt(1)
 	target.Lsh(target, uint(256-targetBits))
-
 	pow := &ProofOfWork{b, target}
-
 	return pow
 }
 
@@ -47,7 +45,6 @@ func (pow *ProofOfWork) Run() (int, []byte) {
 		hash = sha256.Sum256(data)
 
 		hashInt.SetBytes(hash[:])
-
 		if hashInt.Cmp(pow.target) == -1 {
 			break
 		} else {
