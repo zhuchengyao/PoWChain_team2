@@ -1,0 +1,24 @@
+{
+  "Blocks": [
+    {
+      "Header": {
+        "Index": 0,
+        "Timestamp": 1733755339,
+        "PreviousHash": "0",
+        "Nonce": 57,
+        "MerkleRoot": ""
+      },
+      "Transactions": [],
+      "Hash": "009d9f4584ac023f96051831420efae2e993117c1f645effba41343d8fb16be4"
+    }
+  ],
+  "Difficulty": 2,
+  "TransactionPool": [
+    {
+      "Sender": "Charls",
+      "Receiver": "Bob",
+      "Amount": 5,
+      "Signature": "40962864946473675581286559436731798832950798069685605290621190180290114829767:100164125836284857553078251523408735673877046366520609064608274294702231217194"
+    }
+  ]
+}

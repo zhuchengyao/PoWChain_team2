@@ -7,14 +7,17 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
+	"strings"
 )
 
 // 定义节点结构
 type Node struct {
-	Address    string                      // 节点地址
-	Blockchain *Blockchain                 // 节点的区块链实例
-	PeerNodes  []string                    // 已连接的其他节点地址
-	PublicKeys map[string]*ecdsa.PublicKey // 存储用户的公钥
+	Address         string                      // 节点地址
+	Blockchain      *Blockchain                 // 区块链实例
+	TransactionPool []Transaction               // 本地交易池
+	PeerNodes       []string                    // 已连接的其他节点地址
+	PublicKeys      map[string]*ecdsa.PublicKey // 用户公钥存储
 }
 
 const (
@@ -25,59 +28,59 @@ const (
 
 // 广播交易给其他节点
 func (node *Node) BroadcastTransaction(tx Transaction) {
+	request := map[string]interface{}{
+		"type":        RequestTypeNewTransaction,
+		"transaction": tx,
+	}
+	node.broadcastToPeers(request)
+}
+
+func connectToPeer(peer string) (net.Conn, error) {
+	conn, err := net.Dial("tcp", peer)
+	if err != nil {
+		fmt.Printf("无法连接到节点 %s: %v\n", peer, err)
+		return nil, err
+	}
+	return conn, nil
+}
+
+// 广播新区块给其他节点
+func (node *Node) BroadcastBlock(block Block) {
+	request := map[string]interface{}{
+		"type":  RequestTypeNewBlock,
+		"block": block,
+	}
+	node.broadcastToPeers(request)
+}
+
+// 通用的广播方法
+func (node *Node) broadcastToPeers(request map[string]interface{}) {
 	for _, peer := range node.PeerNodes {
-		conn, err := net.Dial("tcp", peer)
+		conn, err := connectToPeer(peer) // 使用通用函数
 		if err != nil {
-			fmt.Printf("无法连接到节点 %s: %v\n", peer, err)
-			continue
+			continue // 跳过失败的节点
 		}
 		defer conn.Close()
 
-		request := map[string]interface{}{
-			"type":        "new_transaction",
-			"transaction": tx,
-		}
 		data, _ := json.Marshal(request)
-		data = append(data, '\n') // 添加换行符，确保接收方能正确解析
-		conn.Write(data)
-		fmt.Printf("向节点 %s 广播交易: %+v\n", peer, tx)
-	}
-}
-
-// 启动节点服务器，监听连接
-func (node *Node) Start() {
-	listener, err := net.Listen("tcp", node.Address)
-	if err != nil {
-		fmt.Printf("无法启动节点 %s: %v\n", node.Address, err)
-		os.Exit(1)
-	}
-	defer listener.Close()
-
-	fmt.Printf("节点启动，监听地址: %s\n", node.Address)
-
-	for {
-		conn, err := listener.Accept()
+		data = append(data, '\n') // 确保接收方能正确解析
+		_, err = conn.Write(data) // 处理 Write 错误
 		if err != nil {
-			fmt.Printf("连接错误: %v\n", err)
-			continue
+			fmt.Printf("发送数据到节点 %s 失败: %v\n", peer, err)
+		} else {
+			fmt.Printf("已向节点 %s 发送数据: %+v\n", peer, request)
 		}
-		go node.HandleConnection(conn)
 	}
 }
 
-// 处理节点的连接请求
+// 处理来自其他节点的连接
 func (node *Node) HandleConnection(conn net.Conn) {
 	defer conn.Close()
-	reader := bufio.NewReader(conn)
 
-	// 读取消息
+	reader := bufio.NewReader(conn)
 	message, err := reader.ReadString('\n')
 	if err != nil {
-		if err.Error() == "EOF" {
-			fmt.Println("连接关闭: 对端已发送完数据")
-		} else {
-			fmt.Printf("读取消息错误: %v\n", err)
-		}
+		fmt.Printf("读取消息错误: %v\n", err)
 		return
 	}
 
@@ -88,27 +91,30 @@ func (node *Node) HandleConnection(conn net.Conn) {
 		return
 	}
 
-	// 处理请求类型
 	switch request["type"] {
-	case "new_transaction":
-		// 接收并验证新交易
+	case RequestTypeNewTransaction:
 		var tx Transaction
 		txData, _ := json.Marshal(request["transaction"])
 		json.Unmarshal(txData, &tx)
 		node.HandleNewTransaction(tx)
-	case "new_block":
-		// 接收并验证新块
-		node.ReceiveBlock(request)
-	case "sync":
-		// 返回本地区块链
+
+	case RequestTypeNewBlock:
+		var block Block
+		blockData, _ := json.Marshal(request["block"])
+		json.Unmarshal(blockData, &block)
+		node.HandleNewBlock(block)
+
+	case RequestTypeSync:
 		node.SendBlockchain(conn)
+
 	default:
-		fmt.Printf("未知请求类型: %s\n", request["type"])
+		fmt.Printf("未知请求类型: %v\n", request["type"])
 	}
 }
 
+// 处理新交易
 func (node *Node) HandleNewTransaction(tx Transaction) {
-	filePath := fmt.Sprintf("%s_blockchain.json", node.Address) // 动态生成文件路径
+	filePath := fmt.Sprintf("%s_transaction_pool.json", node.Address)
 	if node.Blockchain.AddTransactionToPool(tx, node.PublicKeys, filePath) {
 		fmt.Printf("新交易已添加到交易池: %+v\n", tx)
 	} else {
@@ -116,45 +122,225 @@ func (node *Node) HandleNewTransaction(tx Transaction) {
 	}
 }
 
-// 发送本地区块链给其他节点
+// 处理新块
+func (node *Node) HandleNewBlock(block Block) {
+	lastBlock := node.Blockchain.Blocks[len(node.Blockchain.Blocks)-1]
+
+	// 验证区块的合法性
+	if block.Header.PreviousHash == lastBlock.Hash && block.Hash == block.CalculateHash() {
+		node.Blockchain.Blocks = append(node.Blockchain.Blocks, block)
+		node.Blockchain.ClearTransactionPool(block.Transactions) // 修复方法未定义问题
+		SaveBlockchain(blockchainFile, node.Blockchain)
+		fmt.Printf("新块已接受: #%d\n", block.Header.Index)
+	} else if block.Header.Index > lastBlock.Header.Index {
+		// 长链规则：尝试同步链
+		fmt.Println("检测到更长的链，尝试同步...")
+		node.SyncBlockchain()
+	} else {
+		fmt.Println("接收到无效的块，已忽略")
+	}
+}
+
+// 启动节点服务器
+func (node *Node) Start() {
+	listener, err := net.Listen("tcp", node.Address)
+	if err != nil {
+		fmt.Printf("无法启动节点 %s: %v\n", node.Address, err)
+		os.Exit(1)
+	}
+	defer listener.Close()
+
+	fmt.Printf("节点已启动，监听地址: %s\n", node.Address)
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			fmt.Printf("连接错误: %v\n", err)
+			continue
+		}
+		go node.HandleConnection(conn)
+	}
+}
+
+// 同步区块链
+func (node *Node) SyncBlockchain() {
+	for _, peer := range node.PeerNodes {
+		conn, err := connectToPeer(peer) // 使用通用函数
+		if err != nil {
+			continue // 如果连接失败，跳过
+		}
+		defer conn.Close()
+
+		request := map[string]interface{}{
+			"type": RequestTypeSync,
+		}
+		data, _ := json.Marshal(request)
+		data = append(data, '\n')
+		_, err = conn.Write(data) // 处理 Write 的错误
+		if err != nil {
+			fmt.Printf("发送数据到节点 %s 失败: %v\n", peer, err)
+			continue
+		}
+
+		// 接收区块链数据
+		reader := bufio.NewReader(conn)
+		response, err := reader.ReadString('\n')
+		if err != nil {
+			fmt.Printf("从节点 %s 接收数据失败: %v\n", peer, err)
+			continue
+		}
+
+		var receivedChain Blockchain
+		err = json.Unmarshal([]byte(response), &receivedChain)
+		if err != nil {
+			fmt.Printf("解析区块链数据失败: %v\n", err)
+			continue
+		}
+
+		if len(receivedChain.Blocks) > len(node.Blockchain.Blocks) {
+			node.Blockchain = &receivedChain
+			SaveBlockchain(blockchainFile, node.Blockchain)
+			fmt.Printf("已从节点 %s 同步到更长的链\n", peer)
+		} else {
+			fmt.Printf("节点 %s 的链较短，无需更新\n", peer)
+		}
+	}
+}
+
+// 返回区块链数据
 func (node *Node) SendBlockchain(conn net.Conn) {
 	data, _ := json.Marshal(node.Blockchain)
 	conn.Write(data)
 }
 
-// 接收其他节点的新块
-func (node *Node) ReceiveBlock(request map[string]interface{}) {
-	var block Block
-	blockData, _ := json.Marshal(request["block"])
-	json.Unmarshal(blockData, &block)
+// 交互模式
+func (node *Node) RunInteractive(privateKeys map[string]*ecdsa.PrivateKey, accounts *[]Account, accountsFile, transactionPoolFile, blockchainFile, encryptionKey string) {
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Printf("节点 %s 已启动，输入 'help' 查看可用指令。\n", node.Address)
 
-	// 验证区块并添加到链
-	lastBlock := node.Blockchain.Blocks[len(node.Blockchain.Blocks)-1]
-	if block.Header.PreviousHash == lastBlock.Hash && block.Hash == block.CalculateHash() {
-		node.Blockchain.Blocks = append(node.Blockchain.Blocks, block)
-		fmt.Printf("接收到新块: #%d\n", block.Header.Index)
-	} else {
-		fmt.Printf("新块无效，拒绝添加: %v\n", block)
+	for {
+		fmt.Print("> ")
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(input) // 去掉用户输入的空格和换行符
+
+		switch {
+		case input == "help":
+			fmt.Println("可用指令：")
+			fmt.Println("  mine - 挖矿并生成新区块")
+			fmt.Println("  tx [sender] [receiver] [amount] - 创建并广播交易")
+			fmt.Println("  sync - 从其他节点同步区块链")
+			fmt.Println("  balance [account] - 查询账户余额")
+			fmt.Println("  create_account [name] - 创建新账户")
+			fmt.Println("  list_accounts - 列出所有账户")
+			fmt.Println("  print - 打印区块链状态")
+			fmt.Println("  exit - 退出程序")
+
+		case input == "mine":
+			fmt.Print("请输入矿工账户名称: ")
+			var miner string                           // 提前声明矿工变量
+			minerInput, err := reader.ReadString('\n') // 使用 := 声明 err
+			if err != nil {
+				fmt.Println("读取矿工账户名称失败:", err)
+				return
+			}
+			miner = strings.TrimSpace(minerInput)
+
+			transactions := node.Blockchain.GetTransactionsForBlock()
+			if len(transactions) == 0 {
+				fmt.Println("没有交易可供打包，跳过挖矿")
+				continue
+			}
+
+			node.Blockchain.AddBlock(transactions, miner, node.PublicKeys, blockchainFile)
+			node.BroadcastBlock(node.Blockchain.Blocks[len(node.Blockchain.Blocks)-1])
+			fmt.Printf("新区块已生成并广播，矿工 %s 获得奖励 50.0\n", miner)
+			transactions = node.Blockchain.GetTransactionsForBlock() // 使用 = 而不是 :=
+			if len(transactions) == 0 {
+				fmt.Println("没有交易可供打包，跳过挖矿")
+				continue
+			}
+			node.Blockchain.AddBlock(transactions, miner, node.PublicKeys, blockchainFile)
+			node.BroadcastBlock(node.Blockchain.Blocks[len(node.Blockchain.Blocks)-1])
+			fmt.Println("新区块已生成并广播")
+
+		case strings.HasPrefix(input, "tx "):
+			args := strings.Split(input, " ")
+			if len(args) != 4 {
+				fmt.Println("用法: tx [sender] [receiver] [amount]")
+				continue
+			}
+			sender := args[1]
+			receiver := args[2]
+			amount := parseAmount(args[3])
+			privateKey, exists := privateKeys[sender]
+			if !exists {
+				fmt.Printf("发送方账户 %s 不存在或私钥丢失\n", sender)
+				continue
+			}
+			tx := NewTransaction(sender, receiver, amount, privateKey)
+
+			// 调用 AddTransactionToPool，并打印 TransactionPool
+			if node.Blockchain.AddTransactionToPool(tx, node.PublicKeys, transactionPoolFile) {
+				fmt.Printf("交易已加入本地交易池: %+v\n", tx)
+				fmt.Printf("当前交易池内容: %+v\n", node.Blockchain.TransactionPool) // 打印交易池内容
+			} else {
+				fmt.Println("交易未能加入交易池")
+			}
+
+			node.BroadcastTransaction(tx)
+			fmt.Printf("交易已广播: %s -> %s (金额: %.2f)\n", sender, receiver, amount)
+
+		case strings.HasPrefix(input, "balance "):
+			args := strings.Split(input, " ")
+			if len(args) != 2 {
+				fmt.Println("用法: balance [account]")
+				continue
+			}
+			account := args[1]
+			balance, exists := node.Blockchain.GetBalance(account)
+			if !exists {
+				fmt.Printf("账户 %s 不存在\n", account)
+			} else {
+				fmt.Printf("账户 %s 的余额: %.2f\n", account, balance)
+			}
+
+		case strings.HasPrefix(input, "create_account "):
+			args := strings.Split(input, " ")
+			if len(args) != 2 {
+				fmt.Println("用法: create_account [name]")
+				continue
+			}
+			name := args[1]
+			CreateNewAccount(name, accounts, privateKeys, node.PublicKeys, accountsFile, encryptionKey)
+			fmt.Printf("账户 %s 已创建\n", name)
+
+		case input == "list_accounts":
+			fmt.Println("现有账户:")
+			for _, acc := range *accounts {
+				fmt.Printf("- %s\n", acc.Name)
+			}
+
+		case input == "print":
+			PrintBlockchain(node.Blockchain)
+
+		case input == "sync":
+			node.SyncBlockchain()
+
+		case input == "exit":
+			fmt.Println("退出节点...")
+			return
+
+		default:
+			fmt.Println("未知指令，输入 'help' 查看可用指令。")
+		}
 	}
 }
 
-// 广播新块给所有连接的节点
-func (node *Node) BroadcastBlock(block Block) {
-	for _, peer := range node.PeerNodes {
-		fmt.Printf("向节点 %s 广播新区块 #%d\n", peer, block.Header.Index)
-		conn, err := net.Dial("tcp", peer)
-		if err != nil {
-			fmt.Printf("无法连接到节点 %s: %v\n", peer, err)
-			continue
-		}
-		defer conn.Close()
-
-		request := map[string]interface{}{
-			"type":  "new_block",
-			"block": block,
-		}
-		data, _ := json.Marshal(request)
-		data = append(data, '\n') // 添加换行符，确保接收方能正确解析
-		conn.Write(data)
+// 辅助函数：解析金额
+func parseAmount(amountStr string) float64 {
+	amount, err := strconv.ParseFloat(amountStr, 64)
+	if err != nil {
+		fmt.Printf("无效金额: %s\n", amountStr)
+		return 0
 	}
+	return amount
 }
