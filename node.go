@@ -9,7 +9,7 @@ import (
 	"net"
 	"os"
 	"strconv"
-	"strings"
+	"time"
 )
 
 type Node struct {
@@ -21,30 +21,12 @@ type Node struct {
 	BalanceManager  *account.BalanceManager
 }
 
-const (
-	RequestTypeSync           = "sync"
-	RequestTypeNewBlock       = "new_block"
-	RequestTypeNewTransaction = "new_transaction"
-	RequestTypeUpdateBalance  = "update_balance"
-)
-
 func (node *Node) BroadcastTransaction(tx Transaction) {
 	node.broadcast(RequestTypeNewTransaction, map[string]interface{}{"transaction": tx})
 }
 
 func (node *Node) BroadcastBlock(block Block) {
 	node.broadcast(RequestTypeNewBlock, map[string]interface{}{"block": block})
-}
-
-func (node *Node) broadcast(requestType string, data map[string]interface{}) {
-	data["type"] = requestType
-	for _, peer := range node.PeerNodes {
-		if err := sendRequestToPeer(peer, data); err != nil {
-			fmt.Printf("广播到节点 %s 失败: %v\n", peer, err)
-		} else {
-			fmt.Printf("广播成功到节点 %s\n", peer)
-		}
-	}
 }
 
 func (node *Node) HandleConnection(conn net.Conn) {
@@ -68,6 +50,7 @@ func (node *Node) HandleConnection(conn net.Conn) {
 	case RequestTypeNewBlock:
 		node.handleBlock(request)
 	case RequestTypeSync:
+		fmt.Println("收到同步请求，返回区块链数据")
 		node.SendBlockchain(conn)
 	case RequestTypeUpdateBalance:
 		node.updateBalance(request)
@@ -76,41 +59,18 @@ func (node *Node) HandleConnection(conn net.Conn) {
 	}
 }
 
-func (node *Node) handleTransaction(request map[string]interface{}) {
-	var tx Transaction
-	if err := mapToStruct(request["transaction"], &tx); err != nil {
-		fmt.Printf("交易解析失败: %v\n", err)
-		return
-	}
-	node.HandleNewTransaction(tx)
-}
-
-func (node *Node) handleBlock(request map[string]interface{}) {
-	var block Block
-	if err := mapToStruct(request["block"], &block); err != nil {
-		fmt.Printf("区块解析失败: %v\n", err)
-		return
-	}
-	node.HandleNewBlock(block)
-}
-
 func (node *Node) updateBalance(request map[string]interface{}) {
-	accountName := request["account"].(string)
+	accountName, ok := request["account"].(string)
+	if !ok {
+		fmt.Println("账户名称解析失败")
+		return
+	}
 	newBalance := request["newBalance"].(float64)
 	node.BalanceManager.SetBalance(accountName, newBalance)
 	if err := node.BalanceManager.SaveBalances(balancesFile); err != nil {
 		fmt.Printf("保存余额失败: %v\n", err)
 	}
 	fmt.Printf("账户 %s 的余额已更新为 %.2f\n", accountName, newBalance)
-}
-
-func (node *Node) HandleNewTransaction(tx Transaction) {
-	filePath := fmt.Sprintf("%s_transaction_pool.json", node.Address)
-	if node.Blockchain.AddTransactionToPool(tx, node.PublicKeys, filePath) {
-		fmt.Printf("交易已添加到交易池: %+v\n", tx)
-	} else {
-		fmt.Printf("交易验证失败: %+v\n", tx)
-	}
 }
 
 func (node *Node) HandleNewBlock(block Block) {
@@ -147,59 +107,14 @@ func (node *Node) Start() {
 	}
 }
 
-func (node *Node) SyncBlockchain() {
-	for _, peer := range node.PeerNodes {
-		request := map[string]interface{}{"type": RequestTypeSync}
-		if err := sendRequestToPeer(peer, request); err != nil {
-			fmt.Printf("同步失败: %v\n", err)
-			continue
-		}
-
-		conn, err := net.Dial("tcp", peer)
-		if err != nil {
-			fmt.Printf("无法连接到节点 %s: %v\n", peer, err)
-			continue
-		}
-		defer conn.Close()
-
-		reader := bufio.NewReader(conn)
-		response, err := reader.ReadString('\n')
-		if err != nil {
-			fmt.Printf("从节点 %s 接收数据失败: %v\n", peer, err)
-			continue
-		}
-
-		var receivedChain Blockchain
-		if err := json.Unmarshal([]byte(response), &receivedChain); err != nil {
-			fmt.Printf("解析区块链失败: %v\n", err)
-			continue
-		}
-
-		if len(receivedChain.Blocks) > len(node.Blockchain.Blocks) {
-			node.Blockchain = &receivedChain
-			SaveBlockchain(blockchainFile, node.Blockchain)
-			fmt.Printf("已从节点 %s 同步到更长的链\n", peer)
-		} else {
-			fmt.Printf("节点 %s 的链较短，无需更新\n", peer)
-		}
-	}
+func connectWithTimeout(address string, timeout time.Duration) (net.Conn, error) {
+	d := net.Dialer{Timeout: timeout}
+	return d.Dial("tcp", address)
 }
 
 func (node *Node) SendBlockchain(conn net.Conn) {
 	data, _ := json.Marshal(node.Blockchain)
 	conn.Write(data)
-}
-
-func sendRequestToPeer(peer string, request map[string]interface{}) error {
-	conn, err := net.Dial("tcp", peer)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	data, _ := json.Marshal(request)
-	_, err = conn.Write(append(data, '\n'))
-	return err
 }
 
 func mapToStruct(data interface{}, target interface{}) error {
@@ -208,67 +123,6 @@ func mapToStruct(data interface{}, target interface{}) error {
 		return err
 	}
 	return json.Unmarshal(jsonData, target)
-}
-
-func (node *Node) RunInteractive(
-	privateKeys map[string]*ecdsa.PrivateKey,
-	accounts *[]account.Account,
-	accountsFile, transactionPoolFile, blockchainFile, encryptionKey string,
-	balanceManager *account.BalanceManager,
-) {
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Printf("节点 %s 已启动，输入 'help' 查看可用指令。\n", node.Address)
-
-	// 命令映射
-	commands := map[string]func([]string){
-		"help": node.showHelp,
-		"mine": func(args []string) { node.handleMine(args, blockchainFile) },
-		"tx": func(args []string) {
-			node.handleTransactionCommand(args, privateKeys, transactionPoolFile, balanceManager)
-		},
-		"sync":    func(args []string) { node.SyncBlockchain() },
-		"balance": func(args []string) { node.handleBalanceCommand(args, balanceManager) },
-		"create_account": func(args []string) {
-			node.handleCreateAccountCommand(args, accounts, privateKeys, accountsFile, encryptionKey, balanceManager)
-		},
-		"list_accounts":  func(args []string) { node.listAccounts(accounts) },
-		"print":          func(args []string) { PrintBlockchain(node.Blockchain) },
-		"verify_balance": func(args []string) { node.handleVerifyBalanceCommand(args, balanceManager) },
-		"exit":           func(args []string) { node.exitNode(balanceManager) },
-	}
-
-	for {
-		fmt.Print("> ")
-		input, _ := reader.ReadString('\n')
-		input = strings.TrimSpace(input) // 去掉用户输入的空格和换行符
-
-		// 解析命令和参数
-		parts := strings.Fields(input)
-		if len(parts) == 0 {
-			continue
-		}
-		command, args := parts[0], parts[1:]
-
-		// 执行命令
-		if cmdFunc, exists := commands[command]; exists {
-			cmdFunc(args)
-		} else {
-			fmt.Println("未知指令，输入 'help' 查看可用指令。")
-		}
-	}
-}
-
-func (node *Node) showHelp(args []string) {
-	fmt.Println("可用指令：")
-	fmt.Println("  mine - 挖矿并生成新区块")
-	fmt.Println("  tx [sender] [receiver] [amount] - 创建并广播交易")
-	fmt.Println("  sync - 从其他节点同步区块链")
-	fmt.Println("  balance [account] - 查询账户余额")
-	fmt.Println("  create_account [name] - 创建新账户")
-	fmt.Println("  list_accounts - 列出所有账户")
-	fmt.Println("  print - 打印区块链状态")
-	fmt.Println("  verify_balance [account] - 验证账户余额是否与区块链记录一致")
-	fmt.Println("  exit - 退出程序")
 }
 
 func (node *Node) handleMine(args []string, blockchainFile string) {

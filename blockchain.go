@@ -2,14 +2,19 @@ package main
 
 import (
 	"crypto/ecdsa"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"gamechain/account"
 	"os"
-	"strings"
 )
+
+type Blockchain struct {
+	Blocks          []Block       // 区块列表
+	Difficulty      int           // 挖矿难度
+	TransactionPool []Transaction // 未确认的交易池
+}
+
+var blockchain *Blockchain // 全局区块链实例
 
 func SaveBlockchain(filePath string, blockchain *Blockchain) {
 	data, _ := json.MarshalIndent(blockchain, "", "  ")
@@ -17,6 +22,27 @@ func SaveBlockchain(filePath string, blockchain *Blockchain) {
 	if err != nil {
 		fmt.Printf("保存区块链失败: %v\n", err)
 	}
+}
+
+// LoadBlockchain 从文件加载区块链
+func LoadBlockchain(filePath string) *Blockchain {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		fmt.Println("未找到区块链文件，创建新区块链")
+		return &Blockchain{Difficulty: 2}
+	}
+	var blockchain Blockchain
+	json.Unmarshal(data, &blockchain)
+	return &blockchain
+}
+
+func (node *Node) handleBlock(request map[string]interface{}) {
+	var block Block
+	if err := mapToStruct(request["block"], &block); err != nil {
+		fmt.Printf("区块解析失败: %v\n", err)
+		return
+	}
+	node.HandleNewBlock(block)
 }
 
 // 初始化区块链（包括加载和创世区块的创建）
@@ -37,31 +63,6 @@ func initializeBlockchain(filePath string, difficulty int) *Blockchain {
 		fmt.Println("创世区块已生成并保存")
 	}
 	return blockchain
-}
-
-// CalculateHash 计算区块的哈希
-func (b *Block) CalculateHash() string {
-	data := fmt.Sprintf("%d%d%s%d%s",
-		b.Header.Index,
-		b.Header.Timestamp,
-		b.Header.PreviousHash,
-		b.Header.Nonce,
-		b.Header.MerkleRoot,
-	)
-	hash := sha256.Sum256([]byte(data))
-	return hex.EncodeToString(hash[:])
-}
-
-// ProofOfWork 执行工作量证明
-func (b *Block) ProofOfWork(difficulty int) {
-	prefix := strings.Repeat("0", difficulty)
-	for {
-		b.Hash = b.CalculateHash()
-		if strings.HasPrefix(b.Hash, prefix) {
-			break
-		}
-		b.Header.Nonce++
-	}
 }
 
 // AddTransactionToPool 添加交易到交易池
