@@ -276,12 +276,22 @@ func (node *Node) RunInteractive(privateKeys map[string]*ecdsa.PrivateKey, accou
 				fmt.Printf("发送方账户 %s 不存在或私钥丢失\n", sender)
 				continue
 			}
+
+			// 检查余额是否充足
+			if balanceMap[sender] < amount {
+				fmt.Printf("账户 %s 余额不足，当前余额: %.2f\n", sender, balanceMap[sender])
+				continue
+			}
+
 			tx := NewTransaction(sender, receiver, amount, privateKey)
 
 			// 调用 AddTransactionToPool，并打印 TransactionPool
 			if node.Blockchain.AddTransactionToPool(tx, node.PublicKeys, transactionPoolFile) {
 				fmt.Printf("交易已加入本地交易池: %+v\n", tx)
 				fmt.Printf("当前交易池内容: %+v\n", node.Blockchain.TransactionPool) // 打印交易池内容
+				// 更新余额
+				balanceMap[sender] -= amount
+				balanceMap[receiver] += amount
 			} else {
 				fmt.Println("交易未能加入交易池")
 			}
@@ -296,7 +306,7 @@ func (node *Node) RunInteractive(privateKeys map[string]*ecdsa.PrivateKey, accou
 				continue
 			}
 			account := args[1]
-			balance, exists := node.Blockchain.GetBalance(account)
+			balance, exists := node.Blockchain.GetBalance(account, *accounts)
 			if !exists {
 				fmt.Printf("账户 %s 不存在\n", account)
 			} else {

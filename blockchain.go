@@ -2,9 +2,12 @@ package main
 
 import (
 	"crypto/ecdsa"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 )
 
 func SaveBlockchain(filePath string, blockchain *Blockchain) {
@@ -12,6 +15,31 @@ func SaveBlockchain(filePath string, blockchain *Blockchain) {
 	err := os.WriteFile(filePath, data, 0644)
 	if err != nil {
 		fmt.Printf("保存区块链失败: %v\n", err)
+	}
+}
+
+// CalculateHash 计算区块的哈希
+func (b *Block) CalculateHash() string {
+	data := fmt.Sprintf("%d%d%s%d%s",
+		b.Header.Index,
+		b.Header.Timestamp,
+		b.Header.PreviousHash,
+		b.Header.Nonce,
+		b.Header.MerkleRoot,
+	)
+	hash := sha256.Sum256([]byte(data))
+	return hex.EncodeToString(hash[:])
+}
+
+// ProofOfWork 执行工作量证明
+func (b *Block) ProofOfWork(difficulty int) {
+	prefix := strings.Repeat("0", difficulty)
+	for {
+		b.Hash = b.CalculateHash()
+		if strings.HasPrefix(b.Hash, prefix) {
+			break
+		}
+		b.Header.Nonce++
 	}
 }
 
@@ -97,10 +125,11 @@ func (bc *Blockchain) AddBlock(transactions []Transaction, miner string, publicK
 	fmt.Println("新区块已生成")
 }
 
-func (bc *Blockchain) GetBalance(account string) (float64, bool) {
+func (bc *Blockchain) GetBalance(account string, accounts []Account) (float64, bool) {
 	exists := false
 	balance := 0.0
 
+	// 遍历区块链获取交易记录
 	for _, block := range bc.Blocks {
 		for _, tx := range block.Transactions {
 			if tx.Sender == account || tx.Receiver == account {
@@ -111,6 +140,17 @@ func (bc *Blockchain) GetBalance(account string) (float64, bool) {
 			}
 			if tx.Receiver == account {
 				balance += tx.Amount
+			}
+		}
+	}
+
+	// 检查账户是否在 accounts.json 中存在
+	if !exists {
+		for _, acc := range accounts {
+			if acc.Name == account {
+				exists = true
+				balance = 100.0 // 返回初始余额
+				break
 			}
 		}
 	}

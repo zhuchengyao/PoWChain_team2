@@ -74,12 +74,17 @@ func LoadAccounts(filePath, encryptionKey string) ([]Account, map[string]*ecdsa.
 	if err == nil {
 		json.Unmarshal(data, &accounts)
 		for _, acc := range accounts {
-			privBytes, _ := decrypt(acc.PrivateKey, encryptionKey) // 使用加密密钥解密私钥
+			privBytes, _ := decrypt(acc.PrivateKey, encryptionKey)
 			privateKey, _ := x509.ParseECPrivateKey(privBytes)
 			pubKeyBytes, _ := hex.DecodeString(acc.PublicKey)
 			publicKey, _ := x509.ParsePKIXPublicKey(pubKeyBytes)
 			privateKeys[acc.Name] = privateKey
 			publicKeys[acc.Name] = publicKey.(*ecdsa.PublicKey)
+
+			// 初始化余额映射
+			if _, exists := balanceMap[acc.Name]; !exists {
+				balanceMap[acc.Name] = 100.0 // 默认初始余额
+			}
 		}
 	}
 
@@ -92,7 +97,8 @@ func SaveAccounts(accounts []Account, filePath string) {
 	os.WriteFile(filePath, data, 0644)
 }
 
-// 创建新账户
+var balanceMap = make(map[string]float64) // 全局余额映射
+
 func CreateNewAccount(name string, accounts *[]Account, privateKeys map[string]*ecdsa.PrivateKey, publicKeys map[string]*ecdsa.PublicKey, filePath, encryptionKey string) {
 	for _, acc := range *accounts {
 		if acc.Name == name {
@@ -117,7 +123,7 @@ func CreateNewAccount(name string, accounts *[]Account, privateKeys map[string]*
 	publicKeys[name] = publicKey
 
 	// 初始化账户的余额
-	InitializeAccountBalance(name, 100.0) // 设置初始余额为 100.0
+	balanceMap[name] = 100.0 // 设置初始余额为 100.0
 
 	SaveAccounts(*accounts, filePath)
 	fmt.Printf("账户 %s 已创建，初始余额为 100.0\n", name)

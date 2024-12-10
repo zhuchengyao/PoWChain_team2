@@ -83,31 +83,6 @@ func CalculateMerkleRoot(transactions []Transaction) string {
 	return hashes[0]
 }
 
-// CalculateHash 计算区块的哈希
-func (b *Block) CalculateHash() string {
-	data := fmt.Sprintf("%d%d%s%d%s",
-		b.Header.Index,
-		b.Header.Timestamp,
-		b.Header.PreviousHash,
-		b.Header.Nonce,
-		b.Header.MerkleRoot,
-	)
-	hash := sha256.Sum256([]byte(data))
-	return hex.EncodeToString(hash[:])
-}
-
-// ProofOfWork 执行工作量证明
-func (b *Block) ProofOfWork(difficulty int) {
-	prefix := strings.Repeat("0", difficulty)
-	for {
-		b.Hash = b.CalculateHash()
-		if strings.HasPrefix(b.Hash, prefix) {
-			break
-		}
-		b.Header.Nonce++
-	}
-}
-
 // NewBlock 创建新区块
 func NewBlock(index int, previousHash string, transactions []Transaction, miner string, reward float64, difficulty int) Block {
 	// 添加矿工奖励交易
