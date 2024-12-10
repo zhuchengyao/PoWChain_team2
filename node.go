@@ -12,50 +12,43 @@ import (
 	"strings"
 )
 
-// 定义节点结构
 type Node struct {
-	Address         string                      // 节点地址
-	Blockchain      *Blockchain                 // 区块链实例
-	TransactionPool []Transaction               // 本地交易池
-	PeerNodes       []string                    // 已连接的其他节点地址
-	PublicKeys      map[string]*ecdsa.PublicKey // 用户公钥存储
+	Address         string
+	Blockchain      *Blockchain
+	TransactionPool []Transaction
+	PeerNodes       []string
+	PublicKeys      map[string]*ecdsa.PublicKey
+	BalanceManager  *account.BalanceManager
 }
 
 const (
 	RequestTypeSync           = "sync"
 	RequestTypeNewBlock       = "new_block"
 	RequestTypeNewTransaction = "new_transaction"
+	RequestTypeUpdateBalance  = "update_balance"
 )
 
 func (node *Node) BroadcastTransaction(tx Transaction) {
-	request := map[string]interface{}{
-		"type":        RequestTypeNewTransaction,
-		"transaction": tx,
-	}
-	for _, peer := range node.PeerNodes {
-		if err := sendRequestToPeer(peer, request); err != nil {
-			continue
-		}
-	}
+	node.broadcast(RequestTypeNewTransaction, map[string]interface{}{"transaction": tx})
 }
 
-// 广播新区块给其他节点
 func (node *Node) BroadcastBlock(block Block) {
-	request := map[string]interface{}{
-		"type":  RequestTypeNewBlock,
-		"block": block,
-	}
+	node.broadcast(RequestTypeNewBlock, map[string]interface{}{"block": block})
+}
+
+func (node *Node) broadcast(requestType string, data map[string]interface{}) {
+	data["type"] = requestType
 	for _, peer := range node.PeerNodes {
-		if err := sendRequestToPeer(peer, request); err != nil {
-			continue
+		if err := sendRequestToPeer(peer, data); err != nil {
+			fmt.Printf("广播到节点 %s 失败: %v\n", peer, err)
+		} else {
+			fmt.Printf("广播成功到节点 %s\n", peer)
 		}
 	}
 }
 
-// 处理来自其他节点的连接
 func (node *Node) HandleConnection(conn net.Conn) {
 	defer conn.Close()
-
 	reader := bufio.NewReader(conn)
 	message, err := reader.ReadString('\n')
 	if err != nil {
@@ -64,63 +57,77 @@ func (node *Node) HandleConnection(conn net.Conn) {
 	}
 
 	var request map[string]interface{}
-	err = json.Unmarshal([]byte(message), &request)
-	if err != nil {
+	if err := json.Unmarshal([]byte(message), &request); err != nil {
 		fmt.Printf("解析消息错误: %v\n", err)
 		return
 	}
 
 	switch request["type"] {
 	case RequestTypeNewTransaction:
-		var tx Transaction
-		txData, _ := json.Marshal(request["transaction"])
-		json.Unmarshal(txData, &tx)
-		node.HandleNewTransaction(tx)
-
+		node.handleTransaction(request)
 	case RequestTypeNewBlock:
-		var block Block
-		blockData, _ := json.Marshal(request["block"])
-		json.Unmarshal(blockData, &block)
-		node.HandleNewBlock(block)
-
+		node.handleBlock(request)
 	case RequestTypeSync:
 		node.SendBlockchain(conn)
-
+	case RequestTypeUpdateBalance:
+		node.updateBalance(request)
 	default:
 		fmt.Printf("未知请求类型: %v\n", request["type"])
 	}
 }
 
-// 处理新交易
+func (node *Node) handleTransaction(request map[string]interface{}) {
+	var tx Transaction
+	if err := mapToStruct(request["transaction"], &tx); err != nil {
+		fmt.Printf("交易解析失败: %v\n", err)
+		return
+	}
+	node.HandleNewTransaction(tx)
+}
+
+func (node *Node) handleBlock(request map[string]interface{}) {
+	var block Block
+	if err := mapToStruct(request["block"], &block); err != nil {
+		fmt.Printf("区块解析失败: %v\n", err)
+		return
+	}
+	node.HandleNewBlock(block)
+}
+
+func (node *Node) updateBalance(request map[string]interface{}) {
+	accountName := request["account"].(string)
+	newBalance := request["newBalance"].(float64)
+	node.BalanceManager.SetBalance(accountName, newBalance)
+	if err := node.BalanceManager.SaveBalances(balancesFile); err != nil {
+		fmt.Printf("保存余额失败: %v\n", err)
+	}
+	fmt.Printf("账户 %s 的余额已更新为 %.2f\n", accountName, newBalance)
+}
+
 func (node *Node) HandleNewTransaction(tx Transaction) {
 	filePath := fmt.Sprintf("%s_transaction_pool.json", node.Address)
 	if node.Blockchain.AddTransactionToPool(tx, node.PublicKeys, filePath) {
-		fmt.Printf("新交易已添加到交易池: %+v\n", tx)
+		fmt.Printf("交易已添加到交易池: %+v\n", tx)
 	} else {
-		fmt.Printf("新交易验证失败: %+v\n", tx)
+		fmt.Printf("交易验证失败: %+v\n", tx)
 	}
 }
 
-// 处理新块
 func (node *Node) HandleNewBlock(block Block) {
 	lastBlock := node.Blockchain.Blocks[len(node.Blockchain.Blocks)-1]
-
-	// 验证区块的合法性
 	if block.Header.PreviousHash == lastBlock.Hash && block.Hash == block.CalculateHash() {
 		node.Blockchain.Blocks = append(node.Blockchain.Blocks, block)
-		node.Blockchain.ClearTransactionPool(block.Transactions) // 修复方法未定义问题
+		node.Blockchain.ClearTransactionPool(block.Transactions)
 		SaveBlockchain(blockchainFile, node.Blockchain)
 		fmt.Printf("新块已接受: #%d\n", block.Header.Index)
 	} else if block.Header.Index > lastBlock.Header.Index {
-		// 长链规则：尝试同步链
 		fmt.Println("检测到更长的链，尝试同步...")
 		node.SyncBlockchain()
 	} else {
-		fmt.Println("接收到无效的块，已忽略")
+		fmt.Println("无效块，已忽略")
 	}
 }
 
-// 启动节点服务器
 func (node *Node) Start() {
 	listener, err := net.Listen("tcp", node.Address)
 	if err != nil {
@@ -128,8 +135,8 @@ func (node *Node) Start() {
 		os.Exit(1)
 	}
 	defer listener.Close()
+	fmt.Printf("节点启动，监听地址: %s\n", node.Address)
 
-	fmt.Printf("节点已启动，监听地址: %s\n", node.Address)
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -140,18 +147,14 @@ func (node *Node) Start() {
 	}
 }
 
-// 同步区块链
 func (node *Node) SyncBlockchain() {
 	for _, peer := range node.PeerNodes {
-		request := map[string]interface{}{
-			"type": RequestTypeSync,
-		}
+		request := map[string]interface{}{"type": RequestTypeSync}
 		if err := sendRequestToPeer(peer, request); err != nil {
-			fmt.Printf("同步请求发送失败: %v\n", err)
+			fmt.Printf("同步失败: %v\n", err)
 			continue
 		}
 
-		// 接收区块链数据
 		conn, err := net.Dial("tcp", peer)
 		if err != nil {
 			fmt.Printf("无法连接到节点 %s: %v\n", peer, err)
@@ -167,9 +170,8 @@ func (node *Node) SyncBlockchain() {
 		}
 
 		var receivedChain Blockchain
-		err = json.Unmarshal([]byte(response), &receivedChain)
-		if err != nil {
-			fmt.Printf("解析区块链数据失败: %v\n", err)
+		if err := json.Unmarshal([]byte(response), &receivedChain); err != nil {
+			fmt.Printf("解析区块链失败: %v\n", err)
 			continue
 		}
 
@@ -183,143 +185,116 @@ func (node *Node) SyncBlockchain() {
 	}
 }
 
-// 返回区块链数据
 func (node *Node) SendBlockchain(conn net.Conn) {
 	data, _ := json.Marshal(node.Blockchain)
 	conn.Write(data)
 }
 
-// 交互模式
+func sendRequestToPeer(peer string, request map[string]interface{}) error {
+	conn, err := net.Dial("tcp", peer)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	data, _ := json.Marshal(request)
+	_, err = conn.Write(append(data, '\n'))
+	return err
+}
+
+func mapToStruct(data interface{}, target interface{}) error {
+	jsonData, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(jsonData, target)
+}
+
 func (node *Node) RunInteractive(
 	privateKeys map[string]*ecdsa.PrivateKey,
 	accounts *[]account.Account,
-	accountsFile,
-	transactionPoolFile,
-	blockchainFile,
-	encryptionKey string,
-	balanceManager *account.BalanceManager, // 添加 BalanceManager 参数
+	accountsFile, transactionPoolFile, blockchainFile, encryptionKey string,
+	balanceManager *account.BalanceManager,
 ) {
 	reader := bufio.NewReader(os.Stdin)
 	fmt.Printf("节点 %s 已启动，输入 'help' 查看可用指令。\n", node.Address)
+
+	// 命令映射
+	commands := map[string]func([]string){
+		"help": node.showHelp,
+		"mine": func(args []string) { node.handleMine(args, blockchainFile) },
+		"tx": func(args []string) {
+			node.handleTransactionCommand(args, privateKeys, transactionPoolFile, balanceManager)
+		},
+		"sync":    func(args []string) { node.SyncBlockchain() },
+		"balance": func(args []string) { node.handleBalanceCommand(args, balanceManager) },
+		"create_account": func(args []string) {
+			node.handleCreateAccountCommand(args, accounts, privateKeys, accountsFile, encryptionKey, balanceManager)
+		},
+		"list_accounts":  func(args []string) { node.listAccounts(accounts) },
+		"print":          func(args []string) { PrintBlockchain(node.Blockchain) },
+		"verify_balance": func(args []string) { node.handleVerifyBalanceCommand(args, balanceManager) },
+		"exit":           func(args []string) { node.exitNode(balanceManager) },
+	}
 
 	for {
 		fmt.Print("> ")
 		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(input) // 去掉用户输入的空格和换行符
 
-		switch {
-		case input == "help":
-			fmt.Println("可用指令：")
-			fmt.Println("  mine - 挖矿并生成新区块")
-			fmt.Println("  tx [sender] [receiver] [amount] - 创建并广播交易")
-			fmt.Println("  sync - 从其他节点同步区块链")
-			fmt.Println("  balance [account] - 查询账户余额")
-			fmt.Println("  create_account [name] - 创建新账户")
-			fmt.Println("  list_accounts - 列出所有账户")
-			fmt.Println("  print - 打印区块链状态")
-			fmt.Println("  exit - 退出程序")
+		// 解析命令和参数
+		parts := strings.Fields(input)
+		if len(parts) == 0 {
+			continue
+		}
+		command, args := parts[0], parts[1:]
 
-		case input == "mine":
-			fmt.Print("请输入矿工账户名称: ")
-			minerInput, err := reader.ReadString('\n')
-			if err != nil {
-				fmt.Println("读取矿工账户名称失败:", err)
-				return
-			}
-			miner := strings.TrimSpace(minerInput)
-
-			transactions := node.Blockchain.GetTransactionsForBlock()
-			if len(transactions) == 0 {
-				fmt.Println("没有交易可供打包，跳过挖矿")
-				continue
-			}
-
-			node.Blockchain.AddBlock(transactions, miner, node.PublicKeys, blockchainFile)
-			node.BroadcastBlock(node.Blockchain.Blocks[len(node.Blockchain.Blocks)-1])
-			fmt.Printf("新区块已生成并广播，矿工 %s 获得奖励 50.0\n", miner)
-
-		case strings.HasPrefix(input, "tx "):
-			args := strings.Split(input, " ")
-			if len(args) != 4 {
-				fmt.Println("用法: tx [sender] [receiver] [amount]")
-				continue
-			}
-			sender := args[1]
-			receiver := args[2]
-			amount := parseAmount(args[3])
-			privateKey, exists := privateKeys[sender]
-			if !exists {
-				fmt.Printf("发送方账户 %s 不存在或私钥丢失\n", sender)
-				continue
-			}
-
-			// 检查余额是否充足
-			if !balanceManager.DeductBalance(sender, amount) {
-				fmt.Printf("账户 %s 余额不足\n", sender)
-				continue
-			}
-
-			tx := NewTransaction(sender, receiver, amount, privateKey)
-
-			// 调用 AddTransactionToPool，并打印 TransactionPool
-			if node.Blockchain.AddTransactionToPool(tx, node.PublicKeys, transactionPoolFile) {
-				fmt.Printf("交易已加入本地交易池: %+v\n", tx)
-				balanceManager.AddBalance(receiver, amount)
-			} else {
-				fmt.Println("交易未能加入交易池")
-			}
-
-			node.BroadcastTransaction(tx)
-			fmt.Printf("交易已广播: %s -> %s (金额: %.2f)\n", sender, receiver, amount)
-
-		case strings.HasPrefix(input, "balance "):
-			args := strings.Split(input, " ")
-			if len(args) != 2 {
-				fmt.Println("用法: balance [account]")
-				continue
-			}
-			account := args[1]
-			balance, exists := balanceManager.GetBalance(account)
-			if !exists {
-				fmt.Printf("账户 %s 不存在\n", account)
-			} else {
-				fmt.Printf("账户 %s 的余额: %.2f\n", account, balance)
-			}
-
-		case strings.HasPrefix(input, "create_account "):
-			args := strings.Split(input, " ")
-			if len(args) != 2 {
-				fmt.Println("用法: create_account [name]")
-				continue
-			}
-			name := args[1]
-			account.CreateNewAccount(name, accounts, privateKeys, node.PublicKeys, accountsFile, encryptionKey)
-			balanceManager.SetBalance(name, 100.0) // 初始化账户余额
-			fmt.Printf("账户 %s 已创建\n", name)
-
-		case input == "list_accounts":
-			fmt.Println("现有账户:")
-			for _, acc := range *accounts {
-				fmt.Printf("- %s\n", acc.Name)
-			}
-
-		case input == "print":
-			PrintBlockchain(node.Blockchain)
-
-		case input == "sync":
-			node.SyncBlockchain()
-
-		case input == "exit":
-			fmt.Println("退出节点...")
-			return
-
-		default:
+		// 执行命令
+		if cmdFunc, exists := commands[command]; exists {
+			cmdFunc(args)
+		} else {
 			fmt.Println("未知指令，输入 'help' 查看可用指令。")
 		}
 	}
 }
 
-// 辅助函数：解析金额
+func (node *Node) showHelp(args []string) {
+	fmt.Println("可用指令：")
+	fmt.Println("  mine - 挖矿并生成新区块")
+	fmt.Println("  tx [sender] [receiver] [amount] - 创建并广播交易")
+	fmt.Println("  sync - 从其他节点同步区块链")
+	fmt.Println("  balance [account] - 查询账户余额")
+	fmt.Println("  create_account [name] - 创建新账户")
+	fmt.Println("  list_accounts - 列出所有账户")
+	fmt.Println("  print - 打印区块链状态")
+	fmt.Println("  verify_balance [account] - 验证账户余额是否与区块链记录一致")
+	fmt.Println("  exit - 退出程序")
+}
+
+func (node *Node) handleMine(args []string, blockchainFile string) {
+	if len(args) != 1 {
+		fmt.Println("用法: mine [miner_account]")
+		return
+	}
+	miner := args[0]
+	transactions := node.Blockchain.GetTransactionsForBlock()
+	if len(transactions) == 0 {
+		fmt.Println("没有交易可供打包，跳过挖矿")
+		return
+	}
+
+	// 打包交易并生成新区块
+	node.Blockchain.AddBlock(transactions, miner, node.PublicKeys, blockchainFile)
+
+	// 从交易池中移除已打包的交易
+	node.Blockchain.ClearTransactionPool(transactions)
+
+	// 广播新区块
+	node.BroadcastBlock(node.Blockchain.Blocks[len(node.Blockchain.Blocks)-1])
+	fmt.Printf("新区块已生成并广播，矿工 %s 获得奖励 50.0\n", miner)
+}
+
+// parseAmount 将字符串解析为浮点数，如果解析失败则返回 0，并打印错误信息
 func parseAmount(amountStr string) float64 {
 	amount, err := strconv.ParseFloat(amountStr, 64)
 	if err != nil {
@@ -329,20 +304,125 @@ func parseAmount(amountStr string) float64 {
 	return amount
 }
 
-// sendRequestToPeer 向指定节点发送请求
-func sendRequestToPeer(peer string, request map[string]interface{}) error {
-	conn, err := net.Dial("tcp", peer)
-	if err != nil {
-		fmt.Printf("无法连接到节点 %s: %v\n", peer, err)
-		return err
+func (node *Node) handleTransactionCommand(args []string, privateKeys map[string]*ecdsa.PrivateKey, transactionPoolFile string, balanceManager *account.BalanceManager) {
+	if len(args) != 3 {
+		fmt.Println("用法: tx [sender] [receiver] [amount]")
+		return
 	}
-	defer conn.Close()
+	sender, receiver, amountStr := args[0], args[1], args[2]
+	amount := parseAmount(amountStr)
+	if amount <= 0 {
+		return
+	}
 
-	data, _ := json.Marshal(request)
-	data = append(data, '\n') // 确保接收方能够正确解析
-	_, err = conn.Write(data)
-	if err != nil {
-		fmt.Printf("发送请求到节点 %s 失败: %v\n", peer, err)
+	if !balanceManager.DeductBalance(sender, amount, balancesFile) {
+		fmt.Printf("[TX] 账户 %s 余额不足\n", sender)
+		return
 	}
-	return err
+
+	tx := NewTransaction(sender, receiver, amount, privateKeys[sender])
+	if node.Blockchain.AddTransactionToPool(tx, node.PublicKeys, transactionPoolFile) {
+		balanceManager.AddBalance(receiver, amount, balancesFile)
+		node.BroadcastTransaction(tx)
+		fmt.Printf("[TX] 交易已广播: %s -> %s (金额: %.2f)\n", sender, receiver, amount)
+	} else {
+		fmt.Println("[TX] 交易未能加入交易池")
+	}
+}
+
+func (node *Node) handleBalanceCommand(args []string, balanceManager *account.BalanceManager) {
+	if len(args) != 1 {
+		fmt.Println("用法: balance [account]")
+		return
+	}
+	account := args[0]
+	balance, exists := balanceManager.GetBalance(account)
+	if !exists {
+		fmt.Printf("账户 %s 不存在\n", account)
+	} else {
+		fmt.Printf("账户 %s 的余额: %.2f\n", account, balance)
+	}
+}
+
+func (node *Node) handleCreateAccountCommand(args []string, accounts *[]account.Account, privateKeys map[string]*ecdsa.PrivateKey, accountsFile, encryptionKey string, balanceManager *account.BalanceManager) {
+	if len(args) != 1 {
+		fmt.Println("用法: create_account [name]")
+		return
+	}
+	name := args[0]
+	account.CreateNewAccount(name, accounts, privateKeys, node.PublicKeys, accountsFile, encryptionKey)
+	balanceManager.SetBalance(name, 100.0) // 初始化账户余额
+	fmt.Printf("账户 %s 已创建\n", name)
+}
+
+func (node *Node) listAccounts(accounts *[]account.Account) {
+	fmt.Println("现有账户:")
+	for _, acc := range *accounts {
+		fmt.Printf("- %s\n", acc.Name)
+	}
+}
+
+func (node *Node) handleVerifyBalanceCommand(args []string, balanceManager *account.BalanceManager) {
+	// 参数检查，确保不需要输入账户名
+	if len(args) != 0 {
+		fmt.Println("用法: verify_balance (无需参数)")
+		return
+	}
+
+	fmt.Println("开始验证所有账户的余额...")
+
+	// 获取所有账户的名称
+	allAccounts := balanceManager.GetAllAccounts()
+	if len(allAccounts) == 0 {
+		fmt.Println("没有找到任何账户")
+		return
+	}
+
+	// 遍历每个账户进行验证
+	for _, accountName := range allAccounts {
+		// 根据区块链计算余额
+		calculatedBalance := node.Blockchain.ValidateBalance(accountName)
+
+		// 从余额管理器中获取当前余额
+		currentBalance, exists := balanceManager.GetBalance(accountName)
+		if !exists {
+			fmt.Printf("账户 %s 不存在于余额管理器中，跳过\n", accountName)
+			continue
+		}
+
+		// 检查余额是否一致
+		if calculatedBalance == currentBalance {
+			fmt.Printf("账户 %s 的余额验证通过: %.2f\n", accountName, currentBalance)
+		} else {
+			// 更新余额
+			fmt.Printf("账户 %s 的余额不一致: 当前余额=%.2f, 计算余额=%.2f\n", accountName, currentBalance, calculatedBalance)
+			balanceManager.SetBalance(accountName, calculatedBalance)
+
+			// 异步保存余额
+			go func(account string) {
+				if err := balanceManager.SaveBalances(balancesFile); err != nil {
+					fmt.Printf("保存账户 %s 的余额失败: %v\n", account, err)
+				} else {
+					fmt.Printf("账户 %s 的余额已成功保存到文件\n", account)
+				}
+			}(accountName)
+
+			// 广播更新余额
+			node.broadcast(RequestTypeUpdateBalance, map[string]interface{}{
+				"account":    accountName,
+				"newBalance": calculatedBalance,
+			})
+			fmt.Printf("账户 %s 的余额已更新为 %.2f，并尝试广播\n", accountName, calculatedBalance)
+		}
+	}
+
+	fmt.Println("所有账户余额验证完成")
+}
+
+func (node *Node) exitNode(balanceManager *account.BalanceManager) {
+	fmt.Println("保存余额并退出节点...")
+	if err := balanceManager.SaveBalances(balancesFile); err != nil {
+		fmt.Printf("保存余额失败: %v\n", err)
+	}
+	os.Exit(0)
 }

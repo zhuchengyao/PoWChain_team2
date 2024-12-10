@@ -84,21 +84,20 @@ func (bc *Blockchain) AddTransactionToPool(tx Transaction, publicKeys map[string
 // ClearTransactionPool 清除已打包的交易
 func (bc *Blockchain) ClearTransactionPool(transactions []Transaction) {
 	remaining := []Transaction{}
-	for _, poolTx := range bc.TransactionPool {
+	for _, tx := range bc.TransactionPool {
 		included := false
-		for _, blockTx := range transactions {
-			// 如果交易池中的交易已包含在区块中，则跳过
-			if poolTx == blockTx {
+		for _, includedTx := range transactions {
+			if tx == includedTx {
 				included = true
 				break
 			}
 		}
 		if !included {
-			remaining = append(remaining, poolTx)
+			remaining = append(remaining, tx)
 		}
 	}
 	bc.TransactionPool = remaining
-	fmt.Printf("交易池已更新，移除已打包的交易\n")
+	fmt.Println("交易池已清理，移除已打包的交易")
 }
 
 // PrintBlockchain 打印区块链的状态
@@ -177,4 +176,33 @@ func (bc *Blockchain) GetBalance(account string, accounts []account.Account) (fl
 	}
 
 	return balance, exists
+}
+
+// ValidateBalance 根据区块链的记录验证账户余额
+func (bc *Blockchain) ValidateBalance(account string) float64 {
+	balance := 0.0
+
+	// 遍历区块链计算余额
+	for _, block := range bc.Blocks {
+		for _, tx := range block.Transactions {
+			if tx.Sender == account {
+				balance -= tx.Amount
+			}
+			if tx.Receiver == account {
+				balance += tx.Amount
+			}
+		}
+	}
+
+	// 遍历交易池计算余额（仅处理未确认交易）
+	for _, tx := range bc.TransactionPool {
+		if tx.Sender == account {
+			balance -= tx.Amount
+		}
+		if tx.Receiver == account {
+			balance += tx.Amount
+		}
+	}
+
+	return balance
 }

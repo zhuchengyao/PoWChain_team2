@@ -168,6 +168,7 @@ const (
 	blockchainFile      = "blockchain.json"
 	transactionPoolFile = "transaction_pool.json"
 	encryptionKey       = "my_secure_password" // 用于加解密私钥的密钥
+	balancesFile        = "balances.json"      // 余额文件路径
 )
 
 // 入口函数
@@ -181,9 +182,21 @@ func main() {
 	}
 
 	// 初始化余额管理器
+	// 初始化余额管理器
 	balanceManager := account.NewBalanceManager()
+
+	// 从文件加载余额数据
+	err = balanceManager.LoadBalances(balancesFile)
+	if err != nil {
+		fmt.Printf("加载余额失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	// 为新账户设置默认余额
 	for _, acc := range accounts {
-		balanceManager.SetBalance(acc.Name, 100.0) // 设置默认初始余额
+		if _, exists := balanceManager.GetBalance(acc.Name); !exists {
+			balanceManager.SetBalance(acc.Name, 100.0) // 设置默认余额
+		}
 	}
 
 	// 加载区块链并创建创世区块（如果尚未存在）
@@ -206,6 +219,7 @@ func main() {
 		TransactionPool: blockchain.TransactionPool,
 		PeerNodes:       peerNodes,
 		PublicKeys:      publicKeys,
+		BalanceManager:  balanceManager, // 传递 BalanceManager
 	}
 
 	// 启动节点
