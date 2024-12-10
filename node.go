@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"encoding/json"
 	"fmt"
+	"gamechain/account"
 	"net"
 	"os"
 	"strconv"
@@ -26,22 +27,16 @@ const (
 	RequestTypeNewTransaction = "new_transaction"
 )
 
-// 广播交易给其他节点
 func (node *Node) BroadcastTransaction(tx Transaction) {
 	request := map[string]interface{}{
 		"type":        RequestTypeNewTransaction,
 		"transaction": tx,
 	}
-	node.broadcastToPeers(request)
-}
-
-func connectToPeer(peer string) (net.Conn, error) {
-	conn, err := net.Dial("tcp", peer)
-	if err != nil {
-		fmt.Printf("无法连接到节点 %s: %v\n", peer, err)
-		return nil, err
+	for _, peer := range node.PeerNodes {
+		if err := sendRequestToPeer(peer, request); err != nil {
+			continue
+		}
 	}
-	return conn, nil
 }
 
 // 广播新区块给其他节点
@@ -50,25 +45,9 @@ func (node *Node) BroadcastBlock(block Block) {
 		"type":  RequestTypeNewBlock,
 		"block": block,
 	}
-	node.broadcastToPeers(request)
-}
-
-// 通用的广播方法
-func (node *Node) broadcastToPeers(request map[string]interface{}) {
 	for _, peer := range node.PeerNodes {
-		conn, err := connectToPeer(peer) // 使用通用函数
-		if err != nil {
-			continue // 跳过失败的节点
-		}
-		defer conn.Close()
-
-		data, _ := json.Marshal(request)
-		data = append(data, '\n') // 确保接收方能正确解析
-		_, err = conn.Write(data) // 处理 Write 错误
-		if err != nil {
-			fmt.Printf("发送数据到节点 %s 失败: %v\n", peer, err)
-		} else {
-			fmt.Printf("已向节点 %s 发送数据: %+v\n", peer, request)
+		if err := sendRequestToPeer(peer, request); err != nil {
+			continue
 		}
 	}
 }
@@ -164,24 +143,22 @@ func (node *Node) Start() {
 // 同步区块链
 func (node *Node) SyncBlockchain() {
 	for _, peer := range node.PeerNodes {
-		conn, err := connectToPeer(peer) // 使用通用函数
-		if err != nil {
-			continue // 如果连接失败，跳过
-		}
-		defer conn.Close()
-
 		request := map[string]interface{}{
 			"type": RequestTypeSync,
 		}
-		data, _ := json.Marshal(request)
-		data = append(data, '\n')
-		_, err = conn.Write(data) // 处理 Write 的错误
-		if err != nil {
-			fmt.Printf("发送数据到节点 %s 失败: %v\n", peer, err)
+		if err := sendRequestToPeer(peer, request); err != nil {
+			fmt.Printf("同步请求发送失败: %v\n", err)
 			continue
 		}
 
 		// 接收区块链数据
+		conn, err := net.Dial("tcp", peer)
+		if err != nil {
+			fmt.Printf("无法连接到节点 %s: %v\n", peer, err)
+			continue
+		}
+		defer conn.Close()
+
 		reader := bufio.NewReader(conn)
 		response, err := reader.ReadString('\n')
 		if err != nil {
@@ -213,7 +190,15 @@ func (node *Node) SendBlockchain(conn net.Conn) {
 }
 
 // 交互模式
-func (node *Node) RunInteractive(privateKeys map[string]*ecdsa.PrivateKey, accounts *[]Account, accountsFile, transactionPoolFile, blockchainFile, encryptionKey string) {
+func (node *Node) RunInteractive(
+	privateKeys map[string]*ecdsa.PrivateKey,
+	accounts *[]account.Account,
+	accountsFile,
+	transactionPoolFile,
+	blockchainFile,
+	encryptionKey string,
+	balanceManager *account.BalanceManager, // 添加 BalanceManager 参数
+) {
 	reader := bufio.NewReader(os.Stdin)
 	fmt.Printf("节点 %s 已启动，输入 'help' 查看可用指令。\n", node.Address)
 
@@ -236,13 +221,12 @@ func (node *Node) RunInteractive(privateKeys map[string]*ecdsa.PrivateKey, accou
 
 		case input == "mine":
 			fmt.Print("请输入矿工账户名称: ")
-			var miner string                           // 提前声明矿工变量
-			minerInput, err := reader.ReadString('\n') // 使用 := 声明 err
+			minerInput, err := reader.ReadString('\n')
 			if err != nil {
 				fmt.Println("读取矿工账户名称失败:", err)
 				return
 			}
-			miner = strings.TrimSpace(minerInput)
+			miner := strings.TrimSpace(minerInput)
 
 			transactions := node.Blockchain.GetTransactionsForBlock()
 			if len(transactions) == 0 {
@@ -253,14 +237,6 @@ func (node *Node) RunInteractive(privateKeys map[string]*ecdsa.PrivateKey, accou
 			node.Blockchain.AddBlock(transactions, miner, node.PublicKeys, blockchainFile)
 			node.BroadcastBlock(node.Blockchain.Blocks[len(node.Blockchain.Blocks)-1])
 			fmt.Printf("新区块已生成并广播，矿工 %s 获得奖励 50.0\n", miner)
-			transactions = node.Blockchain.GetTransactionsForBlock() // 使用 = 而不是 :=
-			if len(transactions) == 0 {
-				fmt.Println("没有交易可供打包，跳过挖矿")
-				continue
-			}
-			node.Blockchain.AddBlock(transactions, miner, node.PublicKeys, blockchainFile)
-			node.BroadcastBlock(node.Blockchain.Blocks[len(node.Blockchain.Blocks)-1])
-			fmt.Println("新区块已生成并广播")
 
 		case strings.HasPrefix(input, "tx "):
 			args := strings.Split(input, " ")
@@ -278,8 +254,8 @@ func (node *Node) RunInteractive(privateKeys map[string]*ecdsa.PrivateKey, accou
 			}
 
 			// 检查余额是否充足
-			if balanceMap[sender] < amount {
-				fmt.Printf("账户 %s 余额不足，当前余额: %.2f\n", sender, balanceMap[sender])
+			if !balanceManager.DeductBalance(sender, amount) {
+				fmt.Printf("账户 %s 余额不足\n", sender)
 				continue
 			}
 
@@ -288,10 +264,7 @@ func (node *Node) RunInteractive(privateKeys map[string]*ecdsa.PrivateKey, accou
 			// 调用 AddTransactionToPool，并打印 TransactionPool
 			if node.Blockchain.AddTransactionToPool(tx, node.PublicKeys, transactionPoolFile) {
 				fmt.Printf("交易已加入本地交易池: %+v\n", tx)
-				fmt.Printf("当前交易池内容: %+v\n", node.Blockchain.TransactionPool) // 打印交易池内容
-				// 更新余额
-				balanceMap[sender] -= amount
-				balanceMap[receiver] += amount
+				balanceManager.AddBalance(receiver, amount)
 			} else {
 				fmt.Println("交易未能加入交易池")
 			}
@@ -306,7 +279,7 @@ func (node *Node) RunInteractive(privateKeys map[string]*ecdsa.PrivateKey, accou
 				continue
 			}
 			account := args[1]
-			balance, exists := node.Blockchain.GetBalance(account, *accounts)
+			balance, exists := balanceManager.GetBalance(account)
 			if !exists {
 				fmt.Printf("账户 %s 不存在\n", account)
 			} else {
@@ -320,7 +293,8 @@ func (node *Node) RunInteractive(privateKeys map[string]*ecdsa.PrivateKey, accou
 				continue
 			}
 			name := args[1]
-			CreateNewAccount(name, accounts, privateKeys, node.PublicKeys, accountsFile, encryptionKey)
+			account.CreateNewAccount(name, accounts, privateKeys, node.PublicKeys, accountsFile, encryptionKey)
+			balanceManager.SetBalance(name, 100.0) // 初始化账户余额
 			fmt.Printf("账户 %s 已创建\n", name)
 
 		case input == "list_accounts":
@@ -353,4 +327,22 @@ func parseAmount(amountStr string) float64 {
 		return 0
 	}
 	return amount
+}
+
+// sendRequestToPeer 向指定节点发送请求
+func sendRequestToPeer(peer string, request map[string]interface{}) error {
+	conn, err := net.Dial("tcp", peer)
+	if err != nil {
+		fmt.Printf("无法连接到节点 %s: %v\n", peer, err)
+		return err
+	}
+	defer conn.Close()
+
+	data, _ := json.Marshal(request)
+	data = append(data, '\n') // 确保接收方能够正确解析
+	_, err = conn.Write(data)
+	if err != nil {
+		fmt.Printf("发送请求到节点 %s 失败: %v\n", peer, err)
+	}
+	return err
 }

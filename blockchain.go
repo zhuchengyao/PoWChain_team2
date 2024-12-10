@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"gamechain/account"
 	"os"
 	"strings"
 )
@@ -16,6 +17,26 @@ func SaveBlockchain(filePath string, blockchain *Blockchain) {
 	if err != nil {
 		fmt.Printf("保存区块链失败: %v\n", err)
 	}
+}
+
+// 初始化区块链（包括加载和创世区块的创建）
+func initializeBlockchain(filePath string, difficulty int) *Blockchain {
+	blockchain := LoadBlockchain(filePath)
+	if len(blockchain.Blocks) == 0 {
+		// 创建创世区块
+		genesisBlock := NewBlock(
+			0,               // 区块编号
+			"0",             // 前一区块的哈希（创世区块无前区块）
+			[]Transaction{}, // 创世区块无交易
+			"System",        // 矿工账户（系统账户）
+			0.0,             // 奖励（创世区块无奖励）
+			difficulty,      // 挖矿难度
+		)
+		blockchain.Blocks = append(blockchain.Blocks, genesisBlock)
+		SaveBlockchain(filePath, blockchain)
+		fmt.Println("创世区块已生成并保存")
+	}
+	return blockchain
 }
 
 // CalculateHash 计算区块的哈希
@@ -125,7 +146,7 @@ func (bc *Blockchain) AddBlock(transactions []Transaction, miner string, publicK
 	fmt.Println("新区块已生成")
 }
 
-func (bc *Blockchain) GetBalance(account string, accounts []Account) (float64, bool) {
+func (bc *Blockchain) GetBalance(account string, accounts []account.Account) (float64, bool) {
 	exists := false
 	balance := 0.0
 

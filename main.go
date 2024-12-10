@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"gamechain/account"
 	"math/big"
 	"os"
 	"strings"
@@ -170,16 +171,23 @@ const (
 )
 
 // 入口函数
+
 func main() {
 	// 加载账户
-	accounts, privateKeys, publicKeys := LoadAccounts(accountsFile, encryptionKey)
-	blockchain = LoadBlockchain(blockchainFile)
-	if len(blockchain.Blocks) == 0 {
-		// 创建创世区块
-		genesisBlock := NewBlock(0, "0", []Transaction{}, "System", 0, blockchain.Difficulty)
-		blockchain.Blocks = append(blockchain.Blocks, genesisBlock)
-		SaveBlockchain(blockchainFile, blockchain)
+	accounts, privateKeys, publicKeys, err := account.LoadAccounts(accountsFile, encryptionKey)
+	if err != nil {
+		fmt.Printf("加载账户失败: %v\n", err)
+		os.Exit(1)
 	}
+
+	// 初始化余额管理器
+	balanceManager := account.NewBalanceManager()
+	for _, acc := range accounts {
+		balanceManager.SetBalance(acc.Name, 100.0) // 设置默认初始余额
+	}
+
+	// 加载区块链并创建创世区块（如果尚未存在）
+	blockchain = initializeBlockchain(blockchainFile, 2)
 
 	// 解析命令行参数
 	address := flag.String("address", "localhost:8080", "节点地址")
@@ -189,22 +197,6 @@ func main() {
 	peerNodes := []string{}
 	if *peers != "" {
 		peerNodes = strings.Split(*peers, ",")
-	}
-
-	// 加载区块链
-	blockchain := LoadBlockchain(blockchainFile)
-	if len(blockchain.Blocks) == 0 {
-		// 创建创世区块
-		genesisBlock := NewBlock(
-			0,                     // 区块编号
-			"0",                   // 前一区块的哈希（创世区块无前区块）
-			[]Transaction{},       // 创世区块无交易
-			"System",              // 矿工账户（系统账户）
-			0.0,                   // 奖励（创世区块无奖励）
-			blockchain.Difficulty, // 挖矿难度
-		)
-		blockchain.Blocks = append(blockchain.Blocks, genesisBlock)
-		SaveBlockchain(blockchainFile, blockchain)
 	}
 
 	// 初始化节点
@@ -220,5 +212,5 @@ func main() {
 	go node.Start()
 
 	// 交互式命令行
-	node.RunInteractive(privateKeys, &accounts, accountsFile, transactionPoolFile, blockchainFile, encryptionKey)
+	node.RunInteractive(privateKeys, &accounts, accountsFile, transactionPoolFile, blockchainFile, encryptionKey, balanceManager)
 }
