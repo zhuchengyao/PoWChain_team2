@@ -101,7 +101,6 @@ go run . --address localhost:8082 --peers localhost:8080,localhost:8081
 |---------------------|-----------------------------------------------------|
 | `mine <miner>`      | 挖矿并生成新区块，指定矿工账户                      |
 | `tx <from> <to> <amount>` | 创建并广播交易                                   |
-| `sync`              | 从其他节点同步区块链                                |
 | `balance <account>` | 查询账户余额                                        |
 | `create_account <name>` | 创建新账户                                       |
 | `list_accounts`     | 列出所有账户                                        |
